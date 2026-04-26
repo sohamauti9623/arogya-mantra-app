@@ -12,15 +12,26 @@ dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
+const GEMINI_MODEL = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
+const GEMINI_ENDPOINT = process.env.GEMINI_ENDPOINT || 'https://generativelanguage.googleapis.com/v1beta';
 
 const RECOMMENDATIONS = {
   Acne: 'Possible acne detected. Use non-comedogenic skincare and seek medical guidance if worsening.',
   Eczema: 'Signs of eczema may be present. Keep skin moisturized and consult a dermatologist.',
   Psoriasis: 'Possible psoriasis pattern detected. Schedule a dermatology consultation for confirmation.',
   Chickenpox: 'Possible chickenpox-like rash detected. Isolate and seek immediate medical advice.',
-  'Herpes Zoster': 'Possible shingles detected. Consult dermatologist.',
+  'Herpes Zoster': 'Possible shingles detected. Consult dermatologist immediately.',
   'Healthy Skin': 'No clear disease indicators detected. Continue healthy skin care and monitoring.'
 };
+
+const VALID_CONDITIONS = new Set([
+  'Acne',
+  'Eczema',
+  'Psoriasis',
+  'Chickenpox',
+  'Herpes Zoster',
+  'Healthy Skin'
+]);
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -35,8 +46,8 @@ app.get('/', (_req, res) => {
 });
 
 const severityFromConfidence = (confidence) => {
-  if (confidence >= 0.85) return 'moderate';
-  if (confidence >= 0.7) return 'mild';
+  if (confidence >= 0.85) return 'high';
+  if (confidence >= 0.7) return 'moderate';
   return 'low';
 };
 
@@ -100,7 +111,6 @@ const isSkinLikeImage = async (imageBuffer) => {
   const skinRatio = skinPixels / totalPixels;
   return skinRatio >= 0.18;
 };
-
 
 const heuristicPredictDisease = async (imageBuffer) => {
   const image = await Jimp.read(imageBuffer);
@@ -191,6 +201,152 @@ const runPythonInference = async (imageBuffer) => {
   }
 };
 
+const geminiPrompt = ({ condition, confidence }) => `You are a dermatology AI assistant.
+
+You are given:
+- Image
+- ML prediction: ${condition}
+- Confidence: ${confidence}
+
+Tasks:
+1. Validate if ML prediction makes sense
+2. Improve explanation
+3. Provide severity level
+4. Provide precautions
+5. Detect if prediction is wrong or uncertain
+
+Return JSON only with keys:
+{
+  "final_condition": "",
+  "confidence": "",
+  "severity": "",
+  "explanation": "",
+  "recommendation": ""
+}`;
+
+const safeGeminiFallback = (mlPrediction) => {
+  const confidencePct = Math.round(mlPrediction.confidence * 100);
+  return {
+    final_condition: mlPrediction.disease,
+    confidence: `${confidencePct}% (ML estimate)`,
+    severity: severityFromConfidence(mlPrediction.confidence),
+    explanation: `Primary CNN pattern match suggests ${mlPrediction.disease}. This automated output should be clinically confirmed.`,
+    recommendation: RECOMMENDATIONS[mlPrediction.disease] || 'Consult a dermatologist for diagnosis confirmation.'
+  };
+};
+
+const parseGeminiJson = (rawText) => {
+  const trimmed = rawText.trim();
+  const codeblockMatch = trimmed.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const candidate = codeblockMatch ? codeblockMatch[1] : trimmed;
+  return JSON.parse(candidate);
+};
+
+const confidenceFromText = (value) => {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return value > 1 ? Math.min(Math.max(value / 100, 0), 1) : Math.min(Math.max(value, 0), 1);
+  }
+
+  if (typeof value !== 'string') return null;
+
+  const normalized = value.trim().toLowerCase();
+  if (normalized.includes('high')) return 0.9;
+  if (normalized.includes('medium') || normalized.includes('moderate')) return 0.75;
+  if (normalized.includes('low')) return 0.55;
+
+  const percentMatch = normalized.match(/(\d+(?:\.\d+)?)\s*%/);
+  if (percentMatch) return Math.min(Math.max(Number(percentMatch[1]) / 100, 0), 1);
+
+  const decimalMatch = normalized.match(/(\d+(?:\.\d+)?)/);
+  if (decimalMatch) {
+    const parsed = Number(decimalMatch[1]);
+    if (Number.isFinite(parsed)) {
+      return parsed > 1 ? Math.min(Math.max(parsed / 100, 0), 1) : Math.min(Math.max(parsed, 0), 1);
+    }
+  }
+
+  return null;
+};
+
+const normalizeSeverity = (value, fallbackConfidence) => {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized.includes('high') || normalized.includes('severe')) return 'high';
+  if (normalized.includes('moderate') || normalized.includes('medium')) return 'moderate';
+  if (normalized.includes('low') || normalized.includes('mild')) return 'low';
+  return severityFromConfidence(fallbackConfidence);
+};
+
+const runGeminiReasoning = async ({ imageBuffer, mlPrediction }) => {
+  const apiKey = process.env.AI_API_KEY;
+  if (!apiKey) {
+    return {
+      ...safeGeminiFallback(mlPrediction),
+      reasoning_source: 'fallback_no_api_key'
+    };
+  }
+
+  try {
+    const response = await fetch(`${GEMINI_ENDPOINT}/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: geminiPrompt({ condition: mlPrediction.disease, confidence: mlPrediction.confidence }) },
+            {
+              inline_data: {
+                mime_type: 'image/jpeg',
+                data: imageBuffer.toString('base64')
+              }
+            }
+          ]
+        }],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.2
+        }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gemini request failed: ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) throw new Error('Gemini empty response');
+
+    const parsed = parseGeminiJson(text);
+
+    return {
+      final_condition: String(parsed.final_condition || mlPrediction.disease),
+      confidence: parsed.confidence ?? `${Math.round(mlPrediction.confidence * 100)}%`,
+      severity: normalizeSeverity(parsed.severity, mlPrediction.confidence),
+      explanation: String(parsed.explanation || ''),
+      recommendation: String(parsed.recommendation || RECOMMENDATIONS[mlPrediction.disease]),
+      reasoning_source: 'gemini'
+    };
+  } catch (error) {
+    console.warn('Gemini reasoning unavailable, using fallback:', error.message);
+    return {
+      ...safeGeminiFallback(mlPrediction),
+      reasoning_source: 'fallback_error'
+    };
+  }
+};
+
+const normalizeFinalCondition = (text, mlDisease) => {
+  if (!text) return mlDisease;
+
+  for (const condition of VALID_CONDITIONS) {
+    if (text.toLowerCase().includes(condition.toLowerCase())) {
+      return condition;
+    }
+  }
+
+  return mlDisease;
+};
+
 app.post('/analyze', upload.single('image'), async (req, res) => {
   try {
     const imageBuffer = await decodeImageBuffer(req);
@@ -215,19 +371,35 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
       prediction = await heuristicPredictDisease(imageBuffer);
     }
 
-    const disease = prediction?.disease;
-    const confidence = Number(prediction?.confidence || 0);
+    const mlCondition = prediction?.disease;
+    const mlConfidence = Number(prediction?.confidence || 0);
 
-    if (!disease || Number.isNaN(confidence)) {
+    if (!mlCondition || Number.isNaN(mlConfidence)) {
       throw new Error('Model inference output missing fields');
     }
 
+    const geminiResult = await runGeminiReasoning({
+      imageBuffer,
+      mlPrediction: { disease: mlCondition, confidence: mlConfidence }
+    });
+
+    const finalCondition = normalizeFinalCondition(geminiResult.final_condition, mlCondition);
+    const geminiConfidence = confidenceFromText(geminiResult.confidence);
+    const finalConfidence = Number((geminiConfidence == null
+      ? mlConfidence
+      : (mlConfidence * 0.65 + geminiConfidence * 0.35)).toFixed(4));
+
     return res.json({
       valid: true,
-      disease,
-      confidence,
-      severity: severityFromConfidence(confidence),
-      recommendation: RECOMMENDATIONS[disease] || 'Consult a dermatologist for diagnosis confirmation.'
+      condition: finalCondition,
+      confidence: finalConfidence,
+      severity: normalizeSeverity(geminiResult.severity, finalConfidence),
+      source: geminiResult.reasoning_source === 'gemini' ? 'ML + Gemini validated' : 'ML prediction with rule-based fallback',
+      advice: geminiResult.recommendation || RECOMMENDATIONS[finalCondition],
+      explanation: geminiResult.explanation,
+      ml_condition: mlCondition,
+      ml_confidence: mlConfidence,
+      gemini_explanation: geminiResult.explanation
     });
   } catch (error) {
     console.error('Analyze endpoint error:', error);
