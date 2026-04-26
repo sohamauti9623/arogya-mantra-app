@@ -184,3 +184,25 @@ This application is for educational and screening purposes only. It should not r
 <p align="center">
   Made with ❤️ for accessible healthcare technology
 </p>
+## 🔌 Backend + Frontend Deployment (Render + Vercel)
+
+### 1) Backend (Render)
+1. Push this repo to GitHub.
+2. In Render, create a **Web Service** and select `backend` folder.
+3. Build command: `npm install`
+4. Start command: `npm start`
+5. Add environment variable:
+   - `AI_API_KEY=your_real_key`
+6. Deploy and copy URL, e.g. `https://arogya-mantra-backend.onrender.com`
+
+### 2) Frontend (Vercel)
+1. Import repo to Vercel.
+2. Set root directory to `skin-disease-detection`.
+3. Framework preset: **Create React App**.
+4. Add environment variable:
+   - `REACT_APP_BACKEND_URL=https://arogya-mantra-backend.onrender.com`
+5. Deploy.
+
+### 3) Verify
+- Open frontend URL and upload an image.
+- Frontend should call `${REACT_APP_BACKEND_URL}/analyze` and no longer use any API key in browser code.

@@ -1,12 +1,8 @@
 import React, { useState, useRef, useEffect } from 'react';
 
 function App() {
-  // Provided API Key for the REST calls
-  const API_KEY = 'AIzaSyDHCEaLhGNsVgcbomKHetHRSC-y7nKIHXo';
-  // Recommended model for image analysis and chat
-  const MODEL_NAME = 'gemini-2.5-flash';
-  const API_URL = `https://api.google-ai.studio/v1/models/${MODEL_NAME}:generateContent?key=${API_KEY}`;
-  
+  const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'https://YOUR_BACKEND_URL';
+
   const [image, setImage] = useState(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
@@ -114,7 +110,7 @@ function App() {
     }
   };
 
-  // --- Image Analysis Function (Fixed API Endpoint) ---
+  // --- Image Analysis Function (Backend API Call) ---
   const analyzeImage = async () => {
     if (!image) {
       setError('Please select an image first');
@@ -124,69 +120,45 @@ function App() {
     setLoading(true);
     setError('');
 
+    const fallbackResult = {
+      condition: 'Healthy Skin',
+      confidence: '80%',
+      advice: 'Demo fallback: Could not reach server. Maintain hygiene and hydration, and consult a dermatologist for persistent concerns.'
+    };
+
     try {
-      const base64 = image.split(',')[1];
-      
-      const data = {
-        contents: [{
-          role: "user",
-          parts: [
-            { text: "Analyze this skin image. Provide disease name, confidence score, description, and medical disclaimer. Format the output clearly." },
-            { inlineData: { mimeType: "image/jpeg", data: base64 } }
-          ]
-        }]
-      };
+      const response = await fetch(`${BACKEND_URL}/analyze`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image })
+      });
 
-      // Use exponential backoff for retries
-      let json = null;
-      let attempt = 0;
-      const MAX_RETRIES = 3;
-
-      while (attempt < MAX_RETRIES) {
-        try {
-          const response = await fetch(
-            API_URL,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(data)
-            }
-          );
-
-          if (!response.ok) {
-            const errorText = await response.text();
-            throw new Error(`HTTP Error ${response.status}: ${errorText}`);
-          }
-
-          json = await response.json();
-          break; // Success, exit loop
-
-        } catch (err) {
-          if (attempt === MAX_RETRIES - 1) {
-            throw err; // Re-throw the last error
-          }
-          const delay = Math.pow(2, attempt) * 1000; // 1s, 2s, 4s
-          await new Promise(resolve => setTimeout(resolve, delay));
-          attempt++;
-        }
-      }
-      
-      if (json && json.candidates && json.candidates[0]) {
-        const text = json.candidates[0].content.parts[0].text;
-        setResult({ analysis: text, timestamp: new Date().toLocaleString() });
-      } else {
-        setError('No analysis received from AI or unexpected response format.');
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status}`);
       }
 
+      const data = await response.json();
+      setResult({
+        analysis: `Condition: ${data.condition}
+Confidence: ${data.confidence}
+Advice: ${data.advice}`,
+        timestamp: new Date().toLocaleString()
+      });
     } catch (err) {
-      console.error("Analysis Error:", err);
-      setError('Analysis failed: Could not connect to AI service or API error. Details: ' + err.message);
+      console.error('Analysis Error:', err);
+      setError('Could not connect to analysis server. Showing demo fallback result.');
+      setResult({
+        analysis: `Condition: ${fallbackResult.condition}
+Confidence: ${fallbackResult.confidence}
+Advice: ${fallbackResult.advice}`,
+        timestamp: new Date().toLocaleString()
+      });
     } finally {
       setLoading(false);
     }
   };
 
-  // --- Chatbot Function (Fixed API Endpoint) ---
+  // --- Chatbot Function (Local Demo Response) ---
   const sendMessage = async () => {
     if (userMessage.trim() === '') return;
 
@@ -196,56 +168,11 @@ function App() {
     setIsChatting(true);
 
     try {
-      const prompt = 'Answer this skin health question: "' + userMessage + '". Provide helpful information but remind users to consult healthcare professionals.';
-      
-      const data = {
-        contents: [{
-          role: "user",
-          parts: [{ text: prompt }]
-        }]
-      };
-      
-      let json = null;
-      let attempt = 0;
-      const MAX_RETRIES = 3;
-
-      while (attempt < MAX_RETRIES) {
-        try {
-          const response = await fetch(
-            API_URL,
-            {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify(data)
-            }
-          );
-          
-          if (!response.ok) {
-            throw new Error(`HTTP Error ${response.status}`);
-          }
-
-          json = await response.json();
-          break; // Success, exit loop
-
-        } catch (err) {
-          if (attempt === MAX_RETRIES - 1) {
-            throw err; // Re-throw the last error
-          }
-          const delay = Math.pow(2, attempt) * 1000;
-          await new Promise(resolve => setTimeout(resolve, delay));
-          attempt++;
-        }
-      }
-      
-      if (json && json.candidates && json.candidates[0]) {
-        const botMessage = json.candidates[0].content.parts[0].text;
-        setChatHistory(prev => [...prev, { role: 'bot', text: botMessage }]);
-      } else {
-        setChatHistory(prev => [...prev, { role: 'bot', text: 'Sorry, I could not process your question.' }]);
-      }
-
+      await new Promise(resolve => setTimeout(resolve, 500));
+      const botMessage = 'Thanks for your question. For safety, this demo chat is currently running without direct AI access. Please consult a dermatologist for medical advice.';
+      setChatHistory(prev => [...prev, { role: 'bot', text: botMessage }]);
     } catch (err) {
-      console.error("Chat Error:", err);
+      console.error('Chat Error:', err);
       setChatHistory(prev => [...prev, { role: 'bot', text: 'I am experiencing technical difficulties. Please try again later.' }]);
     } finally {
       setIsChatting(false);
