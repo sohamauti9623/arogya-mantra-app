@@ -4,6 +4,7 @@ function App() {
   const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'https://YOUR_BACKEND_URL';
 
   const [image, setImage] = useState(null);
+  const [imageFile, setImageFile] = useState(null);
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState('');
@@ -40,6 +41,7 @@ function App() {
       const reader = new FileReader();
       reader.onload = (event) => {
         setImage(event.target.result);
+        setImageFile(file);
         setResult(null);
         setError('');
         // Stop camera if image is uploaded manually
@@ -104,6 +106,10 @@ function App() {
       
       const capturedImage = canvasRef.current.toDataURL('image/jpeg');
       setImage(capturedImage);
+      fetch(capturedImage)
+        .then((res) => res.blob())
+        .then((blob) => setImageFile(new File([blob], 'camera-capture.jpg', { type: 'image/jpeg' })))
+        .catch(() => setImageFile(null));
       setResult(null);
       setError('');
       stopCamera();
@@ -120,39 +126,46 @@ function App() {
     setLoading(true);
     setError('');
 
-    const fallbackResult = {
-      condition: 'Healthy Skin',
-      confidence: '80%',
-      advice: 'Demo fallback: Could not reach server. Maintain hygiene and hydration, and consult a dermatologist for persistent concerns.'
-    };
-
     try {
-      const response = await fetch(`${BACKEND_URL}/analyze`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image })
-      });
-
-      if (!response.ok) {
-        throw new Error(`Server returned ${response.status}`);
+      const formData = new FormData();
+      if (imageFile) {
+        formData.append('image', imageFile);
+      } else {
+        formData.append('image', image);
       }
 
+      const response = await fetch(`${BACKEND_URL}/analyze`, {
+        method: 'POST',
+        body: formData
+      });
+
       const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data?.message || `Server returned ${response.status}`);
+      }
+
+      if (!data.valid) {
+        setResult(null);
+        setError(data.message || 'Invalid input: Please upload a skin-related image');
+        return;
+      }
+
+      const normalizedResult = {
+        disease: data.disease || data.condition || 'Unknown',
+        confidence: typeof data.confidence === 'string' ? Number(String(data.confidence).replace('%', '')) / 100 : Number(data.confidence || 0),
+        severity: data.severity || 'moderate',
+        recommendation: data.recommendation || data.advice || 'Consult dermatologist for confirmation.'
+      };
+
       setResult({
-        analysis: `Condition: ${data.condition}
-Confidence: ${data.confidence}
-Advice: ${data.advice}`,
+        ...normalizedResult,
         timestamp: new Date().toLocaleString()
       });
     } catch (err) {
       console.error('Analysis Error:', err);
-      setError('Could not connect to analysis server. Showing demo fallback result.');
-      setResult({
-        analysis: `Condition: ${fallbackResult.condition}
-Confidence: ${fallbackResult.confidence}
-Advice: ${fallbackResult.advice}`,
-        timestamp: new Date().toLocaleString()
-      });
+      setResult(null);
+      setError(err.message || 'Could not connect to analysis server. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -451,7 +464,10 @@ Advice: ${fallbackResult.advice}`,
                       margin: 0,
                       color: '#10b981'
                     }}>
-                      {result.analysis}
+                      Disease: {result.disease}
+Confidence: {Number.isFinite(result.confidence) ? (result.confidence * 100).toFixed(0) : '0'}%
+Severity: {result.severity}
+Recommendation: {result.recommendation}
                     </pre>
                   </div>
                   <div style={{ fontSize: '0.9rem', color: '#666', textAlign: 'right', marginBottom: '15px' }}>
