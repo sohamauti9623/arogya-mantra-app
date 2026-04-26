@@ -184,6 +184,31 @@ This application is for educational and screening purposes only. It should not r
 <p align="center">
   Made with ❤️ for accessible healthcare technology
 </p>
+
+## 🧠 Hybrid Orchestration Pipeline (`/analyze`)
+
+The backend now works as an **AI orchestrator** with layered analysis:
+
+1. **Skin Validation Layer** (rejects non-skin images)
+2. **ML Classification Layer** (Python CNN inference with heuristic fallback)
+3. **Gemini Reasoning Layer** (optional, enabled with `AI_API_KEY`)
+4. **Response Formatter** (returns condition, confidence, severity, advice, explanation, source)
+
+Example response:
+
+```json
+{
+  "condition": "Herpes Zoster",
+  "confidence": 0.86,
+  "severity": "high",
+  "source": "ML + Gemini validated",
+  "advice": "Consult dermatologist immediately",
+  "explanation": "..."
+}
+```
+
+If Gemini is unavailable, the backend safely falls back to ML + rule-based medical text.
+
 ## 🔌 Backend + Frontend Deployment (Render + Vercel)
 
 ### 1) Backend (Render)

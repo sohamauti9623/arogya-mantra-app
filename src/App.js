@@ -152,10 +152,12 @@ function App() {
       }
 
       const normalizedResult = {
-        disease: data.disease || data.condition || 'Unknown',
+        disease: data.condition || data.disease || 'Unknown',
         confidence: typeof data.confidence === 'string' ? Number(String(data.confidence).replace('%', '')) / 100 : Number(data.confidence || 0),
         severity: data.severity || 'moderate',
-        recommendation: data.recommendation || data.advice || 'Consult dermatologist for confirmation.'
+        recommendation: data.advice || data.recommendation || 'Consult dermatologist for confirmation.',
+        explanation: data.explanation || data.gemini_explanation || 'Automated pre-screening result generated.',
+        source: data.source || 'ML prediction'
       };
 
       setResult({
@@ -464,10 +466,12 @@ function App() {
                       margin: 0,
                       color: '#10b981'
                     }}>
-                      Disease: {result.disease}
+                      Condition: {result.disease}
 Confidence: {Number.isFinite(result.confidence) ? (result.confidence * 100).toFixed(0) : '0'}%
 Severity: {result.severity}
-Recommendation: {result.recommendation}
+Advice: {result.recommendation}
+Source: {result.source}
+Explanation: {result.explanation}
                     </pre>
                   </div>
                   <div style={{ fontSize: '0.9rem', color: '#666', textAlign: 'right', marginBottom: '15px' }}>
