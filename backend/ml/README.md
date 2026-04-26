@@ -24,7 +24,15 @@ cd backend
 python ml/train_model.py
 ```
 
-Artifacts are saved to `backend/ml/artifacts/`:
+## Inference used by API
+
+`server.js` executes:
+
+```bash
+python ml/infer.py --image /tmp/input.jpg
+```
+
+Make sure the artifacts exist in `backend/ml/artifacts/`:
 
 - `skin_disease_model.h5`
 - `label_encoder.pkl`

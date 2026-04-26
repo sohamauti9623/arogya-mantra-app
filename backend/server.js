@@ -3,20 +3,15 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const multer = require('multer');
 const Jimp = require('jimp');
+const { spawn } = require('child_process');
+const os = require('os');
+const path = require('path');
+const fs = require('fs/promises');
 
 dotenv.config();
 
 const app = express();
 const PORT = process.env.PORT || 5000;
-
-const DISEASE_LABELS = [
-  'Acne',
-  'Eczema',
-  'Psoriasis',
-  'Chickenpox',
-  'Herpes Zoster',
-  'Healthy Skin'
-];
 
 const RECOMMENDATIONS = {
   Acne: 'Possible acne detected. Use non-comedogenic skincare and seek medical guidance if worsening.',
@@ -58,13 +53,34 @@ const decodeImageBuffer = async (req) => {
   return Buffer.from(rawBase64, 'base64');
 };
 
+const rgbToHsv = (r, g, b) => {
+  const rn = r / 255;
+  const gn = g / 255;
+  const bn = b / 255;
+  const max = Math.max(rn, gn, bn);
+  const min = Math.min(rn, gn, bn);
+  const d = max - min;
+
+  let h = 0;
+  if (d !== 0) {
+    if (max === rn) h = ((gn - bn) / d) % 6;
+    else if (max === gn) h = (bn - rn) / d + 2;
+    else h = (rn - gn) / d + 4;
+    h *= 60;
+    if (h < 0) h += 360;
+  }
+
+  const s = max === 0 ? 0 : d / max;
+  const v = max;
+  return { h, s, v };
+};
+
 const isSkinLikeImage = async (imageBuffer) => {
   const image = await Jimp.read(imageBuffer);
-  const { data, width, height } = image.bitmap;
+  image.resize(224, 224);
 
-  if (!width || !height || width < 64 || height < 64) {
-    return false;
-  }
+  const { data, width, height } = image.bitmap;
+  if (!width || !height) return false;
 
   let skinPixels = 0;
   const totalPixels = width * height;
@@ -73,48 +89,61 @@ const isSkinLikeImage = async (imageBuffer) => {
     const r = data[i];
     const g = data[i + 1];
     const b = data[i + 2];
+    const { h, s, v } = rgbToHsv(r, g, b);
 
-    const isSkinTone =
-      r > 60 &&
-      g > 40 &&
-      b > 20 &&
-      r > g &&
-      r > b &&
-      Math.abs(r - g) > 10;
+    const rgbRule = r > 40 && g > 20 && b > 10 && r > g && r > b && Math.abs(r - g) > 8;
+    const hsvRule = h >= 0 && h <= 50 && s >= 0.12 && s <= 0.68 && v >= 0.2;
 
-    if (isSkinTone) skinPixels += 1;
+    if (rgbRule && hsvRule) skinPixels += 1;
   }
 
   const skinRatio = skinPixels / totalPixels;
-  return skinRatio >= 0.12;
+  return skinRatio >= 0.18;
 };
 
-const mockPredictDisease = async (imageBuffer) => {
-  const image = await Jimp.read(imageBuffer);
-  image.resize(224, 224).greyscale();
+const runPythonInference = async (imageBuffer) => {
+  const tmpPath = path.join(os.tmpdir(), `skin_${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`);
+  const scriptPath = path.join(__dirname, 'ml', 'infer.py');
 
-  let brightnessSum = 0;
-  image.scan(0, 0, image.bitmap.width, image.bitmap.height, function scan(_x, _y, idx) {
-    brightnessSum += this.bitmap.data[idx];
-  });
+  await fs.writeFile(tmpPath, imageBuffer);
 
-  const avgBrightness = brightnessSum / (224 * 224);
-  const normalized = avgBrightness / 255;
+  try {
+    const pythonBin = process.env.PYTHON_BIN || 'python3';
 
-  const classIndex = Math.min(
-    DISEASE_LABELS.length - 1,
-    Math.floor(normalized * DISEASE_LABELS.length)
-  );
+    const payload = await new Promise((resolve, reject) => {
+      const proc = spawn(pythonBin, [scriptPath, '--image', tmpPath], {
+        cwd: __dirname,
+        env: process.env
+      });
 
-  const disease = DISEASE_LABELS[classIndex];
-  const confidence = Number((0.72 + normalized * 0.24).toFixed(2));
+      let stdout = '';
+      let stderr = '';
 
-  return {
-    disease,
-    confidence,
-    severity: severityFromConfidence(confidence),
-    recommendation: RECOMMENDATIONS[disease]
-  };
+      proc.stdout.on('data', (chunk) => {
+        stdout += chunk.toString();
+      });
+
+      proc.stderr.on('data', (chunk) => {
+        stderr += chunk.toString();
+      });
+
+      proc.on('close', (code) => {
+        if (code !== 0) {
+          reject(new Error(stderr || `Inference process failed with code ${code}`));
+          return;
+        }
+        try {
+          resolve(JSON.parse(stdout));
+        } catch (_e) {
+          reject(new Error('Inference returned invalid JSON'));
+        }
+      });
+    });
+
+    return payload;
+  } finally {
+    await fs.unlink(tmpPath).catch(() => {});
+  }
 };
 
 app.post('/analyze', upload.single('image'), async (req, res) => {
@@ -122,22 +151,10 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     const imageBuffer = await decodeImageBuffer(req);
 
     if (!imageBuffer || imageBuffer.length === 0) {
-      return res.status(400).json({
-        valid: false,
-        message: 'Image is required'
-      });
+      return res.status(400).json({ valid: false, message: 'Image is required' });
     }
 
-    let validSkinImage = false;
-    try {
-      validSkinImage = await isSkinLikeImage(imageBuffer);
-    } catch (_error) {
-      return res.status(400).json({
-        valid: false,
-        message: 'Invalid input: Please upload a skin-related image'
-      });
-    }
-
+    const validSkinImage = await isSkinLikeImage(imageBuffer).catch(() => false);
     if (!validSkinImage) {
       return res.status(200).json({
         valid: false,
@@ -145,20 +162,26 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
       });
     }
 
-    const prediction = await mockPredictDisease(imageBuffer);
+    const prediction = await runPythonInference(imageBuffer);
+    const disease = prediction?.disease;
+    const confidence = Number(prediction?.confidence || 0);
+
+    if (!disease || Number.isNaN(confidence)) {
+      throw new Error('Model inference output missing fields');
+    }
 
     return res.json({
       valid: true,
-      disease: prediction.disease,
-      confidence: prediction.confidence,
-      severity: prediction.severity,
-      recommendation: prediction.recommendation
+      disease,
+      confidence,
+      severity: severityFromConfidence(confidence),
+      recommendation: RECOMMENDATIONS[disease] || 'Consult a dermatologist for diagnosis confirmation.'
     });
   } catch (error) {
     console.error('Analyze endpoint error:', error);
     return res.status(500).json({
       valid: false,
-      message: 'Failed to analyze image'
+      message: 'Analysis failed: model unavailable or inference error'
     });
   }
 });

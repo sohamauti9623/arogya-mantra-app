@@ -1,13 +1,4 @@
-"""Training pipeline for six-class skin disease classification.
-
-Classes:
-- acne
-- eczema
-- psoriasis
-- chickenpox
-- herpes_zoster
-- healthy_skin
-"""
+"""Training pipeline for six-class skin disease classification."""
 
 from __future__ import annotations
 
@@ -41,6 +32,15 @@ CLASS_NAMES = [
     "herpes_zoster",
     "healthy_skin",
 ]
+
+DISPLAY_NAMES = {
+    "acne": "Acne",
+    "eczema": "Eczema",
+    "psoriasis": "Psoriasis",
+    "chickenpox": "Chickenpox",
+    "herpes_zoster": "Herpes Zoster",
+    "healthy_skin": "Healthy Skin",
+}
 
 
 def remove_corrupted_images(dataset_dir: Path) -> int:
@@ -94,10 +94,10 @@ def compute_weights(train_ds):
     return {int(k): float(v) for k, v in zip(classes, weights)}
 
 
-def build_model(backbone_name: str = "mobilenetv2") -> tf.keras.Model:
+def build_model(backbone_name: str = "mobilenetv2") -> tuple[tf.keras.Model, tf.keras.Model]:
     data_augmentation = tf.keras.Sequential(
         [
-            layers.RandomRotation(0.11),  # ≈ ±20°
+            layers.RandomRotation(0.11),
             layers.RandomFlip("horizontal"),
             layers.RandomZoom(height_factor=(-0.2, 0.2), width_factor=(-0.2, 0.2)),
             layers.RandomBrightness(0.2),
@@ -110,25 +110,23 @@ def build_model(backbone_name: str = "mobilenetv2") -> tf.keras.Model:
     x = layers.Rescaling(1.0 / 255)(x)
 
     if backbone_name.lower() == "efficientnetb0":
-        base_model = EfficientNetB0(include_top=False, weights="imagenet", input_tensor=x)
+        base_model = EfficientNetB0(include_top=False, weights="imagenet", input_shape=(224, 224, 3))
     else:
-        base_model = MobileNetV2(include_top=False, weights="imagenet", input_tensor=x)
+        base_model = MobileNetV2(include_top=False, weights="imagenet", input_shape=(224, 224, 3))
 
     base_model.trainable = False
-
-    x = layers.GlobalAveragePooling2D()(base_model.output)
+    x = base_model(x, training=False)
+    x = layers.GlobalAveragePooling2D()(x)
     x = layers.Dropout(0.25)(x)
     outputs = layers.Dense(len(CLASS_NAMES), activation="softmax")(x)
     model = models.Model(inputs=inputs, outputs=outputs)
 
     model.compile(optimizer=tf.keras.optimizers.Adam(), loss="categorical_crossentropy", metrics=["accuracy"])
-    return model
+    return model, base_model
 
 
-def fine_tune(model: tf.keras.Model, unfreeze_from: int = -20):
-    base_model = next(layer for layer in model.layers if isinstance(layer, tf.keras.Model) and layer.name in {"mobilenetv2_1.00_224", "efficientnetb0"})
+def fine_tune(model: tf.keras.Model, base_model: tf.keras.Model, unfreeze_from: int = -20):
     base_model.trainable = True
-
     for layer in base_model.layers[:unfreeze_from]:
         layer.trainable = False
 
@@ -144,7 +142,7 @@ def save_artifacts(model: tf.keras.Model):
 
     model.save(ARTIFACTS_DIR / "skin_disease_model.h5")
 
-    class_mapping = {idx: name for idx, name in enumerate(CLASS_NAMES)}
+    class_mapping = {idx: DISPLAY_NAMES[name] for idx, name in enumerate(CLASS_NAMES)}
     (ARTIFACTS_DIR / "class_mapping.json").write_text(json.dumps(class_mapping, indent=2), encoding="utf-8")
     (ARTIFACTS_DIR / "label_encoder.pkl").write_bytes(pickle.dumps(CLASS_NAMES))
 
@@ -154,14 +152,13 @@ def main():
     print(f"Removed corrupted images: {removed}")
 
     train_ds, val_ds = build_datasets(DATASET_DIR)
-
     train_ds = train_ds.prefetch(tf.data.AUTOTUNE)
     val_ds = val_ds.prefetch(tf.data.AUTOTUNE)
 
     class_weights = compute_weights(train_ds)
     print("Class weights:", class_weights)
 
-    model = build_model(backbone_name="mobilenetv2")
+    model, base_model = build_model(backbone_name="mobilenetv2")
 
     ckpt_path = ARTIFACTS_DIR / "best_checkpoint.keras"
     callbacks = [
@@ -169,22 +166,10 @@ def main():
         ModelCheckpoint(ckpt_path, monitor="val_accuracy", save_best_only=True),
     ]
 
-    model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=10,
-        class_weight=class_weights,
-        callbacks=callbacks,
-    )
+    model.fit(train_ds, validation_data=val_ds, epochs=10, class_weight=class_weights, callbacks=callbacks)
 
-    fine_tune(model)
-    model.fit(
-        train_ds,
-        validation_data=val_ds,
-        epochs=EPOCHS,
-        class_weight=class_weights,
-        callbacks=callbacks,
-    )
+    fine_tune(model, base_model)
+    model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS, class_weight=class_weights, callbacks=callbacks)
 
     save_artifacts(model)
     print("Saved model and label artifacts to", ARTIFACTS_DIR)
