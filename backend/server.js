@@ -123,6 +123,7 @@ const heuristicPredictDisease = async (imageBuffer) => {
   let crustPixels = 0;
   let brightVesiclePixels = 0;
   let dryPlaquePixels = 0;
+  let shinglesVesiclePixels = 0;
 
   for (let i = 0; i < data.length; i += 4) {
     const r = data[i];
@@ -130,7 +131,11 @@ const heuristicPredictDisease = async (imageBuffer) => {
     const b = data[i + 2];
 
     if (r > 135 && g < 110 && b < 120) redInflammation += 1;
-    if (r > 120 && g < 80 && b < 80) crustPixels += 1;
+    // Broadened: includes dark-red AND orange-brown crusts common in shingles
+    if ((r > 110 && g < 95 && b < 100 && r > g + 20) ||
+        (r > 120 && g < 80 && b < 80)) crustPixels += 1;
+    // Shingles vesicles: bright pink/red-tinged blisters
+    if (r > 160 && g > 100 && b > 90 && r > g + 30) shinglesVesiclePixels += 1;
     if (r > 170 && g > 130 && b > 130) brightVesiclePixels += 1;
     if (r > 140 && g > 120 && b > 110 && Math.abs(r - g) < 18 && Math.abs(g - b) < 18) dryPlaquePixels += 1;
   }
@@ -139,8 +144,10 @@ const heuristicPredictDisease = async (imageBuffer) => {
   const crustRatio = crustPixels / totalPixels;
   const vesicleRatio = brightVesiclePixels / totalPixels;
   const plaqueRatio = dryPlaquePixels / totalPixels;
+  const shinglesVesicleRatio = shinglesVesiclePixels / totalPixels;
 
-  if (inflamedRatio > 0.18 && crustRatio > 0.015) {
+  // Shingles: inflamed + crust pixels OR inflamed + pink vesicle clusters
+  if (inflamedRatio > 0.12 && (crustRatio > 0.025 || shinglesVesicleRatio > 0.04)) {
     return { disease: 'Herpes Zoster', confidence: 0.78 };
   }
   if (inflamedRatio > 0.16 && vesicleRatio > 0.07) {
@@ -201,21 +208,28 @@ const runPythonInference = async (imageBuffer) => {
   }
 };
 
-const geminiPrompt = ({ condition, confidence }) => `You are a dermatology AI assistant.
+const geminiPrompt = ({ condition, confidence }) => `You are a dermatology AI assistant analyzing a skin image.
 
-You are given:
-- Image
-- ML prediction: ${condition}
-- Confidence: ${confidence}
+ML model predicted: ${condition} (confidence: ${confidence})
+
+You MUST select final_condition from ONLY these exact options:
+- "Acne" — comedones, whiteheads, pustules typically on face/back/chest
+- "Eczema" — dry, itchy, inflamed patches; often in skin folds
+- "Psoriasis" — thick silvery-white scales on well-defined red plaques
+- "Chickenpox" — widespread itchy blisters scattered across the ENTIRE body bilaterally
+- "Herpes Zoster" — unilateral band or stripe of fluid-filled blisters on ONE side of body or face; may have crusting or redness; critically different from chickenpox which is bilateral/scattered
+- "Healthy Skin" — no visible disease indicators
+
+Key distinction: Shingles (Herpes Zoster) appears as a localized stripe/cluster on ONE side only. If you see a localized cluster of blisters with redness or crusting on one side, prefer Herpes Zoster over Chickenpox.
 
 Tasks:
-1. Validate if ML prediction makes sense
-2. Improve explanation
-3. Provide severity level
-4. Provide precautions
-5. Detect if prediction is wrong or uncertain
+1. Look at the image carefully and validate whether the ML prediction makes sense
+2. If the image shows a unilateral blister stripe or dermatomal pattern, override to Herpes Zoster
+3. Provide severity: low, moderate, or high
+4. Provide a clear explanation of what you see
+5. Provide specific care recommendations
 
-Return JSON only with keys:
+Return ONLY valid JSON with exactly these keys:
 {
   "final_condition": "",
   "confidence": "",
@@ -387,7 +401,7 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     const geminiConfidence = confidenceFromText(geminiResult.confidence);
     const finalConfidence = Number((geminiConfidence == null
       ? mlConfidence
-      : (mlConfidence * 0.65 + geminiConfidence * 0.35)).toFixed(4));
+      : (mlConfidence * 0.35 + geminiConfidence * 0.65)).toFixed(4));
 
     return res.json({
       valid: true,
