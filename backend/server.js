@@ -198,13 +198,8 @@ const runPythonInference = async (imageBuffer) => {
       let stdout = '';
       let stderr = '';
 
-      proc.stdout.on('data', (chunk) => {
-        stdout += chunk.toString();
-      });
-
-      proc.stderr.on('data', (chunk) => {
-        stderr += chunk.toString();
-      });
+      proc.stdout.on('data', (chunk) => { stdout += chunk.toString(); });
+      proc.stderr.on('data', (chunk) => { stderr += chunk.toString(); });
 
       proc.on('close', (code) => {
         if (code !== 0) {
@@ -222,6 +217,65 @@ const runPythonInference = async (imageBuffer) => {
     return payload;
   } finally {
     await fs.unlink(tmpPath).catch(() => {});
+  }
+};
+
+// Gemini-primary classification — used when Python ML is unavailable
+const runGeminiPrimaryClassification = async (imageBuffer) => {
+  const apiKey = process.env.AI_API_KEY;
+  if (!apiKey) return null;
+
+  const primaryPrompt = `You are an expert dermatologist AI. Analyze this skin image and classify the condition.
+
+You MUST return ONLY a valid JSON object — no markdown, no explanation outside the JSON.
+
+Choose final_condition from EXACTLY one of these options:
+- "Acne" — comedones, pustules, whiteheads on face/back/chest
+- "Eczema" — dry, inflamed, itchy patches; often in skin folds
+- "Psoriasis" — thick silvery scales on well-defined red plaques
+- "Chickenpox" — widespread itchy blisters scattered all over the body (bilateral)
+- "Herpes Zoster" — unilateral stripe/band of blisters on ONE side of body or face; dermatomal pattern
+- "Healthy Skin" — no visible disease
+
+Critical distinction: Herpes Zoster = ONE side only, localized stripe. Chickenpox = all over body.
+
+Return ONLY this JSON:
+{
+  "final_condition": "",
+  "confidence": "85%",
+  "severity": "moderate",
+  "explanation": "What you see in the image in 1-2 sentences",
+  "recommendation": "Specific advice for this condition"
+}`;
+
+  try {
+    const response = await fetch(`${GEMINI_ENDPOINT}/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { text: primaryPrompt },
+            { inline_data: { mime_type: 'image/jpeg', data: imageBuffer.toString('base64') } }
+          ]
+        }],
+        generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+      })
+    });
+
+    if (!response.ok) return null;
+    const payload = await response.json();
+    const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!text) return null;
+
+    const parsed = parseGeminiJson(text);
+    if (!parsed?.final_condition) return null;
+
+    console.log('Gemini primary classification:', parsed.final_condition, parsed.confidence);
+    return parsed;
+  } catch (e) {
+    console.warn('Gemini primary classification failed:', e.message);
+    return null;
   }
 };
 
@@ -445,23 +499,38 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
 
     let prediction;
     let heuristicOverrideUsed = false;
+    let inferenceSource = 'ml_python';
+
     try {
       prediction = await runPythonInference(imageBuffer);
+      console.log('Python ML inference succeeded:', prediction);
     } catch (inferenceError) {
-      console.error('=== PYTHON INFERENCE FAILED ===');
-      console.error('Error:', inferenceError.message);
-      const artifactsDir = path.join(__dirname, 'ml', 'artifacts');
-      try {
-        const fsSync = require('fs');
-        const files = fsSync.readdirSync(artifactsDir);
-        console.error('Artifacts dir contents:');
-        for (const f of files) {
-          const stat = fsSync.statSync(path.join(artifactsDir, f));
-          console.error('  ' + f + ': ' + stat.size + ' bytes');
-        }
-      } catch (e) { console.error('Cannot read artifacts dir:', e.message); }
-      console.error('================================');
+      console.warn('Python ML unavailable:', inferenceError.message);
+
+      // Try Gemini as primary classifier first
+      const geminiPrimary = await runGeminiPrimaryClassification(imageBuffer);
+      if (geminiPrimary && geminiPrimary.final_condition) {
+        inferenceSource = 'gemini_primary';
+        const conf = parseFloat(String(geminiPrimary.confidence).replace('%','')) / 100 || 0.82;
+        // Return full result directly from Gemini — skip second Gemini call
+        const finalCondition = normalizeFinalCondition(geminiPrimary.final_condition, 'Unknown');
+        return res.json({
+          valid: true,
+          condition: finalCondition,
+          confidence: conf,
+          severity: normalizeSeverity(geminiPrimary.severity, conf),
+          source: 'Gemini AI Vision (direct classification)',
+          advice: geminiPrimary.recommendation || RECOMMENDATIONS[finalCondition] || 'Consult a dermatologist.',
+          explanation: geminiPrimary.explanation || '',
+          timestamp: new Date().toLocaleString(),
+          gemini_explanation: geminiPrimary.explanation || ''
+        });
+      }
+
+      // Final fallback: heuristic
+      console.warn('Falling back to heuristic');
       prediction = await heuristicPredictDisease(imageBuffer);
+      inferenceSource = 'heuristic';
     }
 
     const reconciliation = await reconcileLowConfidenceHealthyPrediction({ imageBuffer, prediction });
