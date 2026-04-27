@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: arogya-mantra-backend
+    runtime: node
+    rootDir: backend
+    buildCommand: npm install && pip3 install tensorflow numpy Pillow scikit-learn --quiet --break-system-packages
+    startCommand: node server.js
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PYTHON_BIN
+        value: python3
