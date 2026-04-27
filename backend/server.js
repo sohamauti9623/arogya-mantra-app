@@ -497,40 +497,34 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
       });
     }
 
+    // Always use Gemini Vision as primary classifier — most accurate
+    const geminiPrimary = await runGeminiPrimaryClassification(imageBuffer);
+    if (geminiPrimary && geminiPrimary.final_condition) {
+      const conf = parseFloat(String(geminiPrimary.confidence).replace('%','')) / 100 || 0.82;
+      const finalCondition = normalizeFinalCondition(geminiPrimary.final_condition, 'Unknown');
+      console.log('Gemini primary classification:', finalCondition, conf);
+      return res.json({
+        valid: true,
+        condition: finalCondition,
+        confidence: conf,
+        severity: normalizeSeverity(geminiPrimary.severity, conf),
+        source: 'Gemini AI Vision',
+        advice: geminiPrimary.recommendation || RECOMMENDATIONS[finalCondition] || 'Consult a dermatologist.',
+        explanation: geminiPrimary.explanation || '',
+        timestamp: new Date().toLocaleString(),
+        gemini_explanation: geminiPrimary.explanation || ''
+      });
+    }
+
+    // Gemini unavailable — fall back to Python ML then heuristic
     let prediction;
     let heuristicOverrideUsed = false;
-    let inferenceSource = 'ml_python';
-
     try {
       prediction = await runPythonInference(imageBuffer);
       console.log('Python ML inference succeeded:', prediction);
     } catch (inferenceError) {
-      console.warn('Python ML unavailable:', inferenceError.message);
-
-      // Try Gemini as primary classifier first
-      const geminiPrimary = await runGeminiPrimaryClassification(imageBuffer);
-      if (geminiPrimary && geminiPrimary.final_condition) {
-        inferenceSource = 'gemini_primary';
-        const conf = parseFloat(String(geminiPrimary.confidence).replace('%','')) / 100 || 0.82;
-        // Return full result directly from Gemini — skip second Gemini call
-        const finalCondition = normalizeFinalCondition(geminiPrimary.final_condition, 'Unknown');
-        return res.json({
-          valid: true,
-          condition: finalCondition,
-          confidence: conf,
-          severity: normalizeSeverity(geminiPrimary.severity, conf),
-          source: 'Gemini AI Vision (direct classification)',
-          advice: geminiPrimary.recommendation || RECOMMENDATIONS[finalCondition] || 'Consult a dermatologist.',
-          explanation: geminiPrimary.explanation || '',
-          timestamp: new Date().toLocaleString(),
-          gemini_explanation: geminiPrimary.explanation || ''
-        });
-      }
-
-      // Final fallback: heuristic
-      console.warn('Falling back to heuristic');
+      console.warn('Python ML unavailable, using heuristic:', inferenceError.message);
       prediction = await heuristicPredictDisease(imageBuffer);
-      inferenceSource = 'heuristic';
     }
 
     const reconciliation = await reconcileLowConfidenceHealthyPrediction({ imageBuffer, prediction });
