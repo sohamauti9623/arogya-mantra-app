@@ -10,7 +10,7 @@ from PIL import Image
 
 ROOT = Path(__file__).resolve().parent
 ARTIFACTS_DIR = ROOT / "artifacts"
-MODEL_PATH = ARTIFACTS_DIR / "skin_disease_model.h5"
+MODEL_PATH = next((ARTIFACTS_DIR / f for f in ['skin_disease_model.keras', 'skin_disease_model.h5'] if (ARTIFACTS_DIR / f).exists()), ARTIFACTS_DIR / 'skin_disease_model.keras')
 MAPPING_PATH = ARTIFACTS_DIR / "class_mapping.json"
 
 
