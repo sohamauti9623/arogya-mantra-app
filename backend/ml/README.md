@@ -24,6 +24,14 @@ cd backend
 python ml/train_model.py
 ```
 
+With Colab/local GPU, you can tune training:
+
+```bash
+python ml/train_model.py --backbone efficientnetb0 --warmup-epochs 12 --finetune-epochs 20 --unfreeze-from -30
+```
+
+Training now also writes `backend/ml/artifacts/metrics_report.json` with confusion matrix + per-class precision/recall/F1.
+
 ## Inference used by API
 
 `server.js` executes:

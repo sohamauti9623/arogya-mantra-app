@@ -32,6 +32,7 @@ const VALID_CONDITIONS = new Set([
   'Herpes Zoster',
   'Healthy Skin'
 ]);
+const LOW_CONFIDENCE_HEALTHY_THRESHOLD = 0.8;
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -161,6 +162,22 @@ const heuristicPredictDisease = async (imageBuffer) => {
   }
 
   return { disease: 'Healthy Skin', confidence: 0.64 };
+};
+
+const reconcileLowConfidenceHealthyPrediction = async ({ imageBuffer, prediction }) => {
+  const mlCondition = prediction?.disease;
+  const mlConfidence = Number(prediction?.confidence || 0);
+
+  if (mlCondition !== 'Healthy Skin' || Number.isNaN(mlConfidence) || mlConfidence >= LOW_CONFIDENCE_HEALTHY_THRESHOLD) {
+    return { prediction, overridden: false };
+  }
+
+  const heuristic = await heuristicPredictDisease(imageBuffer);
+  if (heuristic.disease !== 'Healthy Skin' && heuristic.confidence >= 0.7) {
+    return { prediction: heuristic, overridden: true };
+  }
+
+  return { prediction, overridden: false };
 };
 
 const runPythonInference = async (imageBuffer) => {
@@ -427,12 +444,17 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     }
 
     let prediction;
+    let heuristicOverrideUsed = false;
     try {
       prediction = await runPythonInference(imageBuffer);
     } catch (inferenceError) {
       console.warn('Python inference unavailable, using heuristic fallback:', inferenceError.message);
       prediction = await heuristicPredictDisease(imageBuffer);
     }
+
+    const reconciliation = await reconcileLowConfidenceHealthyPrediction({ imageBuffer, prediction });
+    prediction = reconciliation.prediction;
+    heuristicOverrideUsed = reconciliation.overridden;
 
     const mlCondition = prediction?.disease;
     const mlConfidence = Number(prediction?.confidence || 0);
@@ -462,6 +484,7 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
       explanation: geminiResult.explanation,
       ml_condition: mlCondition,
       ml_confidence: mlConfidence,
+      heuristic_override_used: heuristicOverrideUsed,
       gemini_explanation: geminiResult.explanation
     });
   } catch (error) {
