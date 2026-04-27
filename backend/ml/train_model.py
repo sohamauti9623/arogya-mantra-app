@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import pickle
 from pathlib import Path
@@ -9,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 from PIL import Image, UnidentifiedImageError
+from sklearn.metrics import classification_report, confusion_matrix
 from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras import layers, models
 from tensorflow.keras.applications import EfficientNetB0, MobileNetV2
@@ -147,7 +149,41 @@ def save_artifacts(model: tf.keras.Model):
     (ARTIFACTS_DIR / "label_encoder.pkl").write_bytes(pickle.dumps(CLASS_NAMES))
 
 
+def evaluate_and_save_metrics(model: tf.keras.Model, val_ds) -> None:
+    y_true = np.concatenate([np.argmax(batch_y.numpy(), axis=1) for _, batch_y in val_ds], axis=0)
+    y_pred_probs = model.predict(val_ds, verbose=0)
+    y_pred = np.argmax(y_pred_probs, axis=1)
+
+    metrics_payload = {
+        "class_names": [DISPLAY_NAMES[name] for name in CLASS_NAMES],
+        "confusion_matrix": confusion_matrix(y_true, y_pred, labels=list(range(len(CLASS_NAMES)))).tolist(),
+        "classification_report": classification_report(
+            y_true,
+            y_pred,
+            labels=list(range(len(CLASS_NAMES))),
+            target_names=[DISPLAY_NAMES[name] for name in CLASS_NAMES],
+            output_dict=True,
+            zero_division=0,
+        ),
+    }
+
+    (ARTIFACTS_DIR / "metrics_report.json").write_text(
+        json.dumps(metrics_payload, indent=2),
+        encoding="utf-8",
+    )
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Train skin disease classifier")
+    parser.add_argument("--backbone", default="mobilenetv2", choices=["mobilenetv2", "efficientnetb0"])
+    parser.add_argument("--warmup-epochs", type=int, default=10)
+    parser.add_argument("--finetune-epochs", type=int, default=EPOCHS)
+    parser.add_argument("--unfreeze-from", type=int, default=-20)
+    return parser.parse_args()
+
+
 def main():
+    args = parse_args()
     removed = remove_corrupted_images(DATASET_DIR)
     print(f"Removed corrupted images: {removed}")
 
@@ -158,7 +194,7 @@ def main():
     class_weights = compute_weights(train_ds)
     print("Class weights:", class_weights)
 
-    model, base_model = build_model(backbone_name="mobilenetv2")
+    model, base_model = build_model(backbone_name=args.backbone)
 
     ckpt_path = ARTIFACTS_DIR / "best_checkpoint.keras"
     callbacks = [
@@ -166,12 +202,19 @@ def main():
         ModelCheckpoint(ckpt_path, monitor="val_accuracy", save_best_only=True),
     ]
 
-    model.fit(train_ds, validation_data=val_ds, epochs=10, class_weight=class_weights, callbacks=callbacks)
+    model.fit(train_ds, validation_data=val_ds, epochs=args.warmup_epochs, class_weight=class_weights, callbacks=callbacks)
 
-    fine_tune(model, base_model)
-    model.fit(train_ds, validation_data=val_ds, epochs=EPOCHS, class_weight=class_weights, callbacks=callbacks)
+    fine_tune(model, base_model, unfreeze_from=args.unfreeze_from)
+    model.fit(
+        train_ds,
+        validation_data=val_ds,
+        epochs=args.finetune_epochs,
+        class_weight=class_weights,
+        callbacks=callbacks,
+    )
 
     save_artifacts(model)
+    evaluate_and_save_metrics(model, val_ds)
     print("Saved model and label artifacts to", ARTIFACTS_DIR)
 
 
