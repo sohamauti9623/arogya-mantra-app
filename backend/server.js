@@ -448,7 +448,19 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     try {
       prediction = await runPythonInference(imageBuffer);
     } catch (inferenceError) {
-      console.warn('Python inference unavailable, using heuristic fallback:', inferenceError.message);
+      console.error('=== PYTHON INFERENCE FAILED ===');
+      console.error('Error:', inferenceError.message);
+      const artifactsDir = path.join(__dirname, 'ml', 'artifacts');
+      try {
+        const fsSync = require('fs');
+        const files = fsSync.readdirSync(artifactsDir);
+        console.error('Artifacts dir contents:');
+        for (const f of files) {
+          const stat = fsSync.statSync(path.join(artifactsDir, f));
+          console.error('  ' + f + ': ' + stat.size + ' bytes');
+        }
+      } catch (e) { console.error('Cannot read artifacts dir:', e.message); }
+      console.error('================================');
       prediction = await heuristicPredictDisease(imageBuffer);
     }
 
@@ -550,4 +562,31 @@ app.post('/chat', async (req, res) => {
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+
+  // Startup diagnostics
+  const fsSync = require('fs');
+  const artifactsDir = path.join(__dirname, 'ml', 'artifacts');
+  const scriptPath = path.join(__dirname, 'ml', 'infer.py');
+  console.log('=== STARTUP DIAGNOSTICS ===');
+  console.log('infer.py exists:', fsSync.existsSync(scriptPath));
+  try {
+    const files = fsSync.readdirSync(artifactsDir);
+    console.log('Artifacts found:');
+    for (const f of files) {
+      const stat = fsSync.statSync(path.join(artifactsDir, f));
+      console.log('  ' + f + ': ' + stat.size + ' bytes' + (stat.size < 1000 ? ' ⚠️  LIKELY LFS POINTER' : ' ✅'));
+    }
+  } catch (e) {
+    console.log('Artifacts dir missing:', e.message);
+  }
+
+  // Test Python is available
+  const { execSync } = require('child_process');
+  try {
+    const pyVersion = execSync('python3 --version 2>&1').toString().trim();
+    console.log('Python:', pyVersion);
+  } catch (e) {
+    console.log('Python3 not found:', e.message);
+  }
+  console.log('===========================');
 });
