@@ -1,7 +1,7 @@
 import React, { useState, useRef, useEffect } from 'react';
 
 function App() {
-  const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'https://YOUR_BACKEND_URL';
+  const BACKEND_URL = process.env.REACT_APP_BACKEND_URL || 'http://localhost:5000';
 
   const [image, setImage] = useState(null);
   const [imageFile, setImageFile] = useState(null);
@@ -173,22 +173,49 @@ function App() {
     }
   };
 
-  // --- Chatbot Function (Local Demo Response) ---
+  const confidencePercent = result && Number.isFinite(result.confidence)
+    ? Math.max(0, Math.min(100, Math.round(result.confidence * 100)))
+    : 0;
+
+  // --- Chatbot Function (Backend API Call) ---
   const sendMessage = async () => {
     if (userMessage.trim() === '') return;
 
-    const newMessage = { role: 'user', text: userMessage };
+    const messageText = userMessage.trim();
+    const newMessage = { role: 'user', text: messageText };
     setChatHistory(prev => [...prev, newMessage]);
     setUserMessage('');
     setIsChatting(true);
 
     try {
-      await new Promise(resolve => setTimeout(resolve, 500));
-      const botMessage = 'Thanks for your question. For safety, this demo chat is currently running without direct AI access. Please consult a dermatologist for medical advice.';
+      const response = await fetch(`${BACKEND_URL}/chat`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: messageText,
+          history: chatHistory,
+          latestAnalysis: result
+            ? {
+              condition: result.disease,
+              confidence: `${confidencePercent}%`,
+              severity: result.severity,
+              advice: result.recommendation,
+              explanation: result.explanation
+            }
+            : null
+        })
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data?.message || `Server returned ${response.status}`);
+      }
+
+      const botMessage = String(data?.reply || 'I am sorry, I could not generate a response right now.');
       setChatHistory(prev => [...prev, { role: 'bot', text: botMessage }]);
     } catch (err) {
       console.error('Chat Error:', err);
-      setChatHistory(prev => [...prev, { role: 'bot', text: 'I am experiencing technical difficulties. Please try again later.' }]);
+      setChatHistory(prev => [...prev, { role: 'bot', text: 'I am having trouble connecting right now. Please try again in a moment.' }]);
     } finally {
       setIsChatting(false);
     }
@@ -457,22 +484,41 @@ function App() {
                     <div style={{ fontSize: '3rem', marginBottom: '10px', color: '#059669' }}>✅</div>
                     <h2 style={{ color: '#059669' }}>Analysis Complete</h2>
                   </div>
-                  <div style={{ backgroundColor: '#f0fdf4', padding: '20px', borderRadius: '10px', marginBottom: '15px', border: '1px solid #d1fae5' }}>
-                    <pre style={{
-                      whiteSpace: 'pre-wrap',
-                      fontFamily: 'Inter, sans-serif',
-                      fontSize: '1rem',
-                      lineHeight: '1.6',
-                      margin: 0,
-                      color: '#10b981'
-                    }}>
-                      Condition: {result.disease}
-Confidence: {Number.isFinite(result.confidence) ? (result.confidence * 100).toFixed(0) : '0'}%
-Severity: {result.severity}
-Advice: {result.recommendation}
-Source: {result.source}
-Explanation: {result.explanation}
-                    </pre>
+                  <div style={{ backgroundColor: '#f8fafc', padding: '20px', borderRadius: '12px', marginBottom: '15px', border: '1px solid #e5e7eb' }}>
+                    <div style={{ display: 'grid', gridTemplateColumns: isMobile ? '1fr' : '1fr 1fr', gap: '12px', marginBottom: '14px' }}>
+                      <div style={{ backgroundColor: 'white', borderRadius: '10px', padding: '12px', border: '1px solid #e5e7eb' }}>
+                        <div style={{ fontSize: '0.8rem', color: '#6b7280', marginBottom: '6px' }}>Condition</div>
+                        <div style={{ fontWeight: '700', color: '#0f766e' }}>{result.disease}</div>
+                      </div>
+                      <div style={{ backgroundColor: 'white', borderRadius: '10px', padding: '12px', border: '1px solid #e5e7eb' }}>
+                        <div style={{ fontSize: '0.8rem', color: '#6b7280', marginBottom: '6px' }}>Severity</div>
+                        <div style={{ fontWeight: '700', textTransform: 'capitalize', color: '#7c3aed' }}>{result.severity}</div>
+                      </div>
+                    </div>
+
+                    <div style={{ marginBottom: '14px' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.9rem', marginBottom: '6px' }}>
+                        <span style={{ color: '#374151', fontWeight: '600' }}>Confidence</span>
+                        <span style={{ color: '#0f766e', fontWeight: '700' }}>{confidencePercent}%</span>
+                      </div>
+                      <div style={{ backgroundColor: '#e5e7eb', borderRadius: '999px', height: '10px', overflow: 'hidden' }}>
+                        <div style={{ width: `${confidencePercent}%`, backgroundColor: '#10b981', height: '100%' }} />
+                      </div>
+                    </div>
+
+                    <div style={{ backgroundColor: 'white', borderRadius: '10px', padding: '12px', border: '1px solid #e5e7eb', marginBottom: '10px' }}>
+                      <div style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '6px' }}>Advice</div>
+                      <div style={{ color: '#1f2937', lineHeight: '1.5' }}>{result.recommendation}</div>
+                    </div>
+
+                    <div style={{ backgroundColor: 'white', borderRadius: '10px', padding: '12px', border: '1px solid #e5e7eb', marginBottom: '10px' }}>
+                      <div style={{ fontSize: '0.85rem', color: '#6b7280', marginBottom: '6px' }}>Explanation</div>
+                      <div style={{ color: '#1f2937', lineHeight: '1.5' }}>{result.explanation}</div>
+                    </div>
+
+                    <div style={{ fontSize: '0.82rem', color: '#6b7280' }}>
+                      Source: {result.source}
+                    </div>
                   </div>
                   <div style={{ fontSize: '0.9rem', color: '#666', textAlign: 'right', marginBottom: '15px' }}>
                     🕒 Analysis Time: {result.timestamp}

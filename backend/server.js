@@ -361,6 +361,55 @@ const normalizeFinalCondition = (text, mlDisease) => {
   return mlDisease;
 };
 
+const buildChatPrompt = ({ question, recentMessages, latestAnalysis }) => {
+  const safeQuestion = String(question || '').trim();
+  const contextMessages = Array.isArray(recentMessages)
+    ? recentMessages
+      .slice(-6)
+      .map((msg) => `${msg?.role === 'user' ? 'User' : 'Assistant'}: ${String(msg?.text || '').slice(0, 400)}`)
+      .join('\n')
+    : '';
+
+  const analysisContext = latestAnalysis
+    ? `Latest skin analysis summary:
+- Condition: ${latestAnalysis.condition || 'Unknown'}
+- Confidence: ${latestAnalysis.confidence || 'Unknown'}
+- Severity: ${latestAnalysis.severity || 'Unknown'}
+- Advice: ${latestAnalysis.advice || 'N/A'}
+- Explanation: ${latestAnalysis.explanation || 'N/A'}`
+    : 'No recent skin analysis data available.';
+
+  return `You are Arogya Mitra, a concise and empathetic skin-health assistant.
+Rules:
+1) Keep response under 130 words unless user asks for detail.
+2) Never claim confirmed diagnosis; use cautious wording.
+3) If symptoms appear serious, advise in-person dermatologist care.
+4) Provide practical, safe next steps.
+5) If user asks unrelated topics, gently redirect to skin health.
+
+Conversation context:
+${contextMessages || 'No previous chat context.'}
+
+${analysisContext}
+
+User question:
+${safeQuestion}`;
+};
+
+const fallbackChatReply = (question) => {
+  const q = String(question || '').toLowerCase();
+  if (q.includes('eczema')) {
+    return 'Eczema often causes dry, itchy, inflamed patches. Use fragrance-free moisturizer, avoid harsh soaps, and seek medical care if rash spreads, cracks, or shows infection signs.';
+  }
+  if (q.includes('acne')) {
+    return 'For acne, cleanse gently twice daily, avoid picking lesions, and use non-comedogenic products. If painful cysts or scarring appear, consult a dermatologist for targeted treatment.';
+  }
+  if (q.includes('sunburn')) {
+    return 'For mild sunburn, cool compresses, hydration, aloe-based moisturizer, and sun avoidance can help. Seek urgent care for blistering over large areas, fever, or severe pain.';
+  }
+  return 'I can help with skin-health questions (symptoms, care tips, warning signs). Share your concern and I will suggest safe next steps, but this is not a medical diagnosis.';
+};
+
 app.post('/analyze', upload.single('image'), async (req, res) => {
   try {
     const imageBuffer = await decodeImageBuffer(req);
@@ -420,6 +469,58 @@ app.post('/analyze', upload.single('image'), async (req, res) => {
     return res.status(500).json({
       valid: false,
       message: 'Analysis failed. Please try again with a clearer skin image.'
+    });
+  }
+});
+
+app.post('/chat', async (req, res) => {
+  try {
+    const question = String(req.body?.message || '').trim();
+    const recentMessages = req.body?.history;
+    const latestAnalysis = req.body?.latestAnalysis;
+
+    if (!question) {
+      return res.status(400).json({ message: 'message is required' });
+    }
+
+    const apiKey = process.env.AI_API_KEY;
+    if (!apiKey) {
+      return res.json({
+        reply: fallbackChatReply(question),
+        source: 'fallback_no_api_key'
+      });
+    }
+
+    const response = await fetch(`${GEMINI_ENDPOINT}/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        contents: [{
+          parts: [{ text: buildChatPrompt({ question, recentMessages, latestAnalysis }) }]
+        }],
+        generationConfig: { temperature: 0.3, maxOutputTokens: 260 }
+      })
+    });
+
+    if (!response.ok) {
+      throw new Error(`Gemini chat request failed: ${response.status}`);
+    }
+
+    const payload = await response.json();
+    const reply = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!reply) {
+      throw new Error('Gemini chat empty response');
+    }
+
+    return res.json({
+      reply: String(reply).trim(),
+      source: 'gemini'
+    });
+  } catch (error) {
+    console.warn('Chat endpoint fallback due to error:', error.message);
+    return res.json({
+      reply: fallbackChatReply(req.body?.message),
+      source: 'fallback_error'
     });
   }
 });
