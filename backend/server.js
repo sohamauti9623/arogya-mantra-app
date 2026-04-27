@@ -46,6 +46,48 @@ app.get('/', (_req, res) => {
   res.json({ message: 'Arogya Mantra backend is running.' });
 });
 
+// Debug endpoint — check Gemini connectivity
+app.get('/debug', async (_req, res) => {
+  const apiKey = process.env.AI_API_KEY;
+  const result = {
+    hasApiKey: !!apiKey,
+    apiKeyLength: apiKey ? apiKey.length : 0,
+    nodeVersion: process.version,
+    geminiEndpoint: process.env.GEMINI_ENDPOINT || 'https://generativelanguage.googleapis.com/v1beta',
+    artifactsDir: {}
+  };
+
+  // Check artifacts
+  const fsSync = require('fs');
+  const artifactsDir = path.join(__dirname, 'ml', 'artifacts');
+  try {
+    for (const f of fsSync.readdirSync(artifactsDir)) {
+      result.artifactsDir[f] = fsSync.statSync(path.join(artifactsDir, f)).size;
+    }
+  } catch(e) { result.artifactsDir.error = e.message; }
+
+  // Test Gemini API with a simple text call
+  if (apiKey) {
+    try {
+      const testResp = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contents: [{ parts: [{ text: 'Reply with just the word: OK' }] }] })
+      });
+      const testData = await testResp.json();
+      result.geminiTest = {
+        status: testResp.status,
+        response: testData?.candidates?.[0]?.content?.parts?.[0]?.text || 'no text',
+        error: testData?.error?.message
+      };
+    } catch(e) {
+      result.geminiTest = { error: e.message };
+    }
+  }
+
+  res.json(result);
+});
+
 const severityFromConfidence = (confidence) => {
   if (confidence >= 0.85) return 'high';
   if (confidence >= 0.7) return 'moderate';
