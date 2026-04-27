@@ -301,16 +301,24 @@ Return ONLY this JSON:
             { inline_data: { mime_type: 'image/jpeg', data: imageBuffer.toString('base64') } }
           ]
         }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.1 }
+        generationConfig: { temperature: 0.1 }
       })
     });
 
-    if (!response.ok) return null;
-    const payload = await response.json();
+    const rawBody = await response.text();
+    console.log('Gemini API status:', response.status);
+    if (!response.ok) {
+      console.warn('Gemini API error:', rawBody.slice(0, 200));
+      return null;
+    }
+
+    const payload = JSON.parse(rawBody);
     const text = payload?.candidates?.[0]?.content?.parts?.[0]?.text;
+    console.log('Gemini raw response:', text ? text.slice(0, 200) : 'EMPTY');
     if (!text) return null;
 
     const parsed = parseGeminiJson(text);
+    console.log('Gemini parsed:', JSON.stringify(parsed));
     if (!parsed?.final_condition) return null;
 
     console.log('Gemini primary classification:', parsed.final_condition, parsed.confidence);
